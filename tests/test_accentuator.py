@@ -3,6 +3,7 @@ import unittest
 from parameterized import parameterized
 
 from stressful import Accentuator
+from stressful.accentuator import vowel_count
 
 
 def mask(bits: str) -> list[bool]:
@@ -45,6 +46,51 @@ class TestAccentuator(unittest.TestCase):
             self.accentuator.accentuate(word),
             mask(with_accents),
             f"failed for {word}",
+        )
+
+    @parameterized.expand(
+        [
+            ("«Силен", "01"),
+            ("«Лету»", "10"),
+            ("«Рассек", "01"),
+            ("(Маневры)", "010"),
+            ("«Полет", "01"),
+            ("«Мытье»", "01"),
+            ("«Броней", "01"),
+            ("«Чета", "10"),
+            ("«Ежа».", "10"),
+            ("«Силен ты, богат и славен,", "01001010"),
+            (
+                "«Чета! иди за мной, -- сказал отец судьбины. --",
+                "1001000101010",
+            ),
+        ]
+    )
+    def test_exception_word_with_punctuation(self, line, with_accents):
+        # Words present in exceptions.json used to shift stress/ё indices by
+        # the leading punctuation, adding a phantom vowel to the mask.
+        result = self.accentuator.accentuate(line)
+
+        self.assertEqual(result, mask(with_accents))
+        self.assertEqual(len(result), vowel_count(line))
+
+    @parameterized.expand(
+        [
+            ("Силен", "«Силен"),
+            ("Лету", "«Лету»"),
+            ("Рассек", "«Рассек"),
+            ("Маневры", "(Маневры)"),
+            ("Полет", "«Полет"),
+            ("Мытье", "«Мытье»"),
+            ("Броней", "«Броней"),
+            ("Чета", "«Чета"),
+            ("Ежа", "«Ежа»."),
+        ]
+    )
+    def test_punctuation_does_not_change_mask(self, bare, with_punctuation):
+        self.assertEqual(
+            self.accentuator.accentuate(bare),
+            self.accentuator.accentuate(with_punctuation),
         )
 
     def test_mark_stresses(self):

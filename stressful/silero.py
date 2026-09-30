@@ -62,6 +62,19 @@ def _decapitalize_stress(stressed_word: str) -> str:
     return stressed_word
 
 
+_LETTER_RE = re.compile(r"[А-Яа-яёЁ]")
+
+
+def _letter_positions(word: str) -> list[int]:
+    """Positions of Cyrillic letters in ``word``.
+
+    Mirrors the tokenizer cleaning (lowercase, drop everything that is not a
+    Cyrillic letter), so positions stored for a cleaned word can be mapped
+    back onto the raw token, which may still contain punctuation or marks.
+    """
+    return [i for i, char in enumerate(word.lower()) if _LETTER_RE.fullmatch(char)]
+
+
 class _BasicTokenizer:
     def __init__(self, never_split=None):
         self.never_split = set(never_split) if never_split else set()
@@ -486,6 +499,14 @@ class SileroAccentor:
     def _accentuate_exception(self, clean_word, raw_word, have_stress):
         exc_stress = self.exceptions[clean_word][0]
         exc_yo = self.exceptions[clean_word][1]
+
+        # Indices in exceptions.json are relative to the cleaned word
+        # (lowercased, punctuation stripped). Map them onto raw_word, which
+        # may still contain punctuation, so slicing happens at the right
+        # characters.
+        positions = _letter_positions(raw_word)
+        exc_stress = positions[exc_stress]
+        exc_yo = positions[exc_yo] if exc_yo != -1 else -1
 
         if have_stress:
             user_stress_token_positions = [

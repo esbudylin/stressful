@@ -34,6 +34,7 @@ import argparse
 import csv
 import logging
 import re
+import time
 from collections import Counter
 from dataclasses import dataclass
 from typing import Callable
@@ -105,47 +106,72 @@ def marked_to_mask(
     return mask
 
 
-def build_predictors() -> dict[str, Predictor]:
+ACCENTUATOR_NAMES = (
+    "stressful",
+    "silero-onnx",
+    "ruaccent",
+    "silero-stress",
+    "stressrnn",
+)
+
+# Predictors that only rely on the stressful library.
+STRESSFUL_ACCENTUATORS = ("stressful", "silero-onnx")
+
+
+def build_predictors(only: set[str] | None = None) -> dict[str, Predictor]:
+    def requested(name: str) -> bool:
+        return only is None or name in only
+
     accentuator = Accentuator()
 
-    predictors: dict[str, Predictor] = {
-        "combined": accentuator.accentuate,
-        "silero": lambda text: extract_accent_mask(accentuator.silero(text)),
-    }
+    predictors: dict[str, Predictor] = {}
 
-    try:
-        from ruaccent import RUAccent
-    except ImportError:
-        logging.warning("ruaccent is not installed, skipping it")
-    else:
-        ruaccent = RUAccent()
-        ruaccent.load(omograph_model_size="turbo3.1", use_dictionary=True)
+    if requested("stressful"):
+        predictors["stressful"] = accentuator.accentuate
 
-        predictors["ruaccent"] = lambda text: marked_to_mask(
-            text, ruaccent.process_all(text)
+    if requested("silero-onnx"):
+        predictors["silero-onnx"] = lambda text: extract_accent_mask(
+            accentuator.silero(text)
         )
 
-    try:
-        from silero_stress import load_accentor
-    except ImportError:
-        logging.warning("silero-stress is not installed, skipping it")
-    else:
-        silero = load_accentor()
+    if requested("ruaccent"):
+        try:
+            from ruaccent import RUAccent
+        except ImportError:
+            logging.warning("ruaccent is not installed, skipping it")
+        else:
+            ruaccent = RUAccent()
+            ruaccent.load(omograph_model_size="turbo3.1", use_dictionary=True)
 
-        predictors["silero-stress"] = lambda text: marked_to_mask(text, silero(text))
+            predictors["ruaccent"] = lambda text: marked_to_mask(
+                text, ruaccent.process_all(text)
+            )
 
-    try:
-        from stressrnn import StressRNN
-    except ImportError:
-        logging.warning("stressrnn is not installed, skipping it")
-    else:
-        stress_rnn = StressRNN()
+    if requested("silero-stress"):
+        try:
+            from silero_stress import load_accentor
+        except ImportError:
+            logging.warning("silero-stress is not installed, skipping it")
+        else:
+            silero = load_accentor()
 
-        predictors["stressrnn"] = lambda text: marked_to_mask(
-            text,
-            stress_rnn.put_stress(text),
-            mark_before_vowel=False,
-        )
+            predictors["silero-stress"] = lambda text: marked_to_mask(
+                text, silero(text)
+            )
+
+    if requested("stressrnn"):
+        try:
+            from stressrnn import StressRNN
+        except ImportError:
+            logging.warning("stressrnn is not installed, skipping it")
+        else:
+            stress_rnn = StressRNN()
+
+            predictors["stressrnn"] = lambda text: marked_to_mask(
+                text,
+                stress_rnn.put_stress(text),
+                mark_before_vowel=False,
+            )
 
     return predictors
 
@@ -226,6 +252,7 @@ def evaluate(
     total_correct = 0
     errors = 0
     diffed_words: Counter[str] = Counter()
+    start = time.perf_counter()
 
     for line in lines:
         try:
@@ -253,6 +280,8 @@ def evaluate(
 
         total_correct += correct
 
+    seconds = time.perf_counter() - start
+
     return dict(
         name=name,
         lines=len(lines),
@@ -261,6 +290,7 @@ def evaluate(
         correct=total_correct,
         word_accuracy=total_correct / total_analysed if total_analysed else 0.0,
         errors=errors,
+        seconds=seconds,
         diffed_words=diffed_words,
     )
 
@@ -268,9 +298,9 @@ def evaluate(
 def render_table(results: list[dict]) -> str:
     rows = [
         "| accentuator | lines | words | analysed | correct | "
-        "word_acc | errors |",
+        "word_acc | errors | time (s) |",
         "|-------------|------:|------:|---------:|--------:|"
-        "---------:|-------:|",
+        "---------:|-------:|---------:|",
     ]
 
     for result in results:
@@ -281,13 +311,19 @@ def render_table(results: list[dict]) -> str:
             f"| {result['analysed']} "
             f"| {result['correct']} "
             f"| {result['word_accuracy']:.4f} "
-            f"| {result['errors']} |"
+            f"| {result['errors']} "
+            f"| {result['seconds']:.2f} |"
         )
 
     return "\n".join(rows)
 
 
-def main(dataset_path: str, limit: int | None = None, output: str | None = None):
+def main(
+    dataset_path: str,
+    limit: int | None = None,
+    output: str | None = None,
+    only: set[str] | None = None,
+):
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     lines = read_dataset(dataset_path)
@@ -301,7 +337,7 @@ def main(dataset_path: str, limit: int | None = None, output: str | None = None)
 
     results = []
 
-    for name, predict in build_predictors().items():
+    for name, predict in build_predictors(only).items():
         logging.info("Evaluating %s", name)
         results.append(evaluate(prepared, predict, name))
 
@@ -333,6 +369,30 @@ if __name__ == "__main__":
         default=None,
         help="Write the comparison table to a markdown file",
     )
+    parser.add_argument(
+        "--only",
+        default=None,
+        help="Comma-separated accentuators to evaluate, e.g. "
+        "'stressful,silero-onnx' for stressful only. "
+        f"Known: {', '.join(ACCENTUATOR_NAMES)}. Default: all.",
+    )
+    parser.add_argument(
+        "--only-stressful",
+        action="store_true",
+        help="Shorthand for --only stressful,silero-onnx",
+    )
     args = parser.parse_args()
 
-    main(args.dataset, limit=args.limit, output=args.output)
+    if args.only_stressful:
+        only = set(STRESSFUL_ACCENTUATORS)
+    elif args.only:
+        only = {name.strip() for name in args.only.split(",") if name.strip()}
+    else:
+        only = None
+
+    if only is not None:
+        unknown = only - set(ACCENTUATOR_NAMES)
+        if unknown:
+            parser.error(f"unknown accentuators: {', '.join(sorted(unknown))}")
+
+    main(args.dataset, limit=args.limit, output=args.output, only=only)
