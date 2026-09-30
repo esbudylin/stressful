@@ -2,6 +2,20 @@
 
 Library for Russian stress placement.
 
+## Installation
+
+Install from the Git repository with pip:
+
+```sh
+pip install "git+https://github.com/esbudylin/stressful"
+```
+
+or with uv:
+
+```sh
+uv add "git+https://github.com/esbudylin/stressful"
+```
+
 ## Usage
 
 `Accentuator()` loads the accent dictionaries and the ML models on
