@@ -75,7 +75,7 @@ libraries.
 |[stressrnn](https://github.com/dbklim/StressRNN)          |  0.8395|
 |[ruaccent](https://github.com/Den4ikAI/ruaccent)          |  0.9351|
 |[silero-stress](https://github.com/snakers4/silero-stress)|  0.9629|
-|*stressful*                                               |  0.9668|
+|**stressful**                                             |  0.9668|
 
 <details>
 <summary>Validation dataset</summary>
