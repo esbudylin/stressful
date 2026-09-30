@@ -32,8 +32,8 @@ from typing import Iterable, Iterator
 from .settings import ACCENT_DICT_PATHS, SILERO_MODEL_DIR, STRESS_TOKEN
 from .silero import SileroAccentor
 
-unstressed_prefix_re = re.compile(r"^по-", re.IGNORECASE)
-unstressed_postfix_re = re.compile(r"-нибудь$", re.IGNORECASE)
+unstressed_prefixes = ["по-"]
+unstressed_postfixes = ["-ка", "-нибудь"]
 
 
 @dataclass
@@ -204,10 +204,17 @@ def apply_special_rules(word: str, mask: list[bool]) -> list[bool]:
     if not mask:
         return mask
 
-    if unstressed_prefix_re.match(word) and mask[0]:
-        mask[0] = False
-    if unstressed_postfix_re.search(word) and len(mask) > 1:
-        mask[-2:] = [False, False]
+    for prefix in unstressed_prefixes:
+        if word.startswith(prefix):
+            vowels = vowel_count(prefix)
+            mask[:vowels] = [False] * vowels
+            break
+
+    for postfix in unstressed_postfixes:
+        if word.endswith(postfix):
+            vowels = vowel_count(postfix)
+            mask[-vowels:] = [False] * vowels
+            break
 
     return mask
 
