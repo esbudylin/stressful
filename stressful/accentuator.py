@@ -171,16 +171,18 @@ def accent_line(
     accent_dict: defaultdict[str, list[AccentEntry]],
     silero_accentor: SileroAccentor,
 ) -> list[bool]:
-    words_nacc = extract_neuro_accents(line, silero_accentor)
-
     line_stripped = re.sub(r"[^А-яЁё\s-]+", "", line)
     words = list(filter(vowel_count, line_stripped.split()))
+    words_nacc = None
 
-    if len(words) != len(words_nacc):
-        raise ValueError(
-            f"""Number of words with vowels ({len(words)})
-            does not match number of neuro-accented words ({len(words_nacc)})"""
-        )
+    def extract_words_nacc():
+        res = extract_neuro_accents(line, silero_accentor)
+        if len(words) != len(res):
+            raise ValueError(
+                f"""Number of words with vowels ({len(words)})
+                does not match number of neuro-accented words ({len(res)})"""
+            )
+        return res
 
     res = []
 
@@ -191,6 +193,9 @@ def accent_line(
             accent_entry = find_accent_entry(word, accent_dict)
 
             if not accent_entry or should_use_neuro_accent(word, accent_entry):
+                if words_nacc is None:
+                    words_nacc = extract_words_nacc()
+
                 word_mask = words_nacc[j]
             else:
                 word_mask = accent_word_by_dict(word, accent_entry)
