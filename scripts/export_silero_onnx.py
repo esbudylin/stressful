@@ -92,14 +92,6 @@ def export_models(accentor):
         ["logits"],
         CLF_DYNAMIC,
     )
-    export_onnx(
-        accentor.accentor.model.yo_clf,
-        (embedding,),
-        os.path.join(SILERO_MODEL_DIR, "yo_clf.onnx"),
-        ["emb"],
-        ["logits"],
-        CLF_DYNAMIC,
-    )
 
 
 def export_data(accentor):

@@ -231,9 +231,6 @@ class SileroAccentor:
         self.stress_session = ort.InferenceSession(
             os.path.join(model_dir, "stress_clf.onnx"), providers=providers
         )
-        self.yo_session = ort.InferenceSession(
-            os.path.join(model_dir, "yo_clf.onnx"), providers=providers
-        )
 
         self.embedding_weight = np.load(os.path.join(model_dir, "embedding.npy"))
         with open(os.path.join(model_dir, "ngram_dict.json")) as f:
@@ -244,11 +241,6 @@ class SileroAccentor:
             }
         with open(os.path.join(model_dir, "homodict.json")) as f:
             self.homodict = json.load(f)
-        self.yohomodict = {
-            word: variants
-            for word, variants in self.homodict.items()
-            if any("ё" in variant for variant in variants)
-        }
 
         with open(os.path.join(model_dir, "phrases.json")) as f:
             phrases = json.load(f)
@@ -304,14 +296,11 @@ class SileroAccentor:
         embeddings = self._embed(words)
 
         stress_logits = self.stress_session.run(None, {"emb": embeddings})[0]
-        yo_logits = self.yo_session.run(None, {"emb": embeddings})[0]
 
         stress_probs = _softmax(stress_logits, axis=1)
         stress_preds = np.argmax(stress_probs, axis=1)
-        yo_probs = _softmax(yo_logits, axis=1)
-        yo_preds = np.argmax(yo_probs, axis=1)
 
-        return stress_probs, stress_preds, yo_probs, yo_preds
+        return stress_probs, stress_preds
 
     def stress_distributions(self, words: list[str]) -> list[list[float]]:
         """Per-word stress probabilities over the word's vowel positions.
@@ -335,7 +324,7 @@ class SileroAccentor:
         if not clean_tokens:
             return [[] for _ in words]
 
-        stress_probs, _, _, _ = self._get_model_preds(clean_tokens)
+        stress_probs, _ = self._get_model_preds(clean_tokens)
 
         result = []
 
