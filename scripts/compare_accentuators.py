@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from stressful import Accentuator
-from stressful.accentuator import extract_accent_mask, is_vowel, vowel_count
+from stressful.accentuator import is_vowel, vowel_count
 
 Predictor = Callable[[str], list[bool]]
 
@@ -118,6 +118,24 @@ ACCENTUATOR_NAMES = (
 STRESSFUL_ACCENTUATORS = ("stressful", "silero-onnx")
 
 
+def words_for_accentuation(text: str) -> list[str]:
+    stripped = re.sub(r"[^А-яЁё\s-]+", "", text)
+    return [word for word in stripped.split() if vowel_count(word)]
+
+
+def neural_mask(accentuator: Accentuator, text: str) -> list[bool]:
+    """Neural-only mask: the accentor's probabilities without the dictionary."""
+    words = words_for_accentuation(text)
+
+    return [
+        probability > 0.5
+        for probabilities, _ in accentuator._silero.accent_word_probabilities(
+            text, words
+        )
+        for probability in probabilities
+    ]
+
+
 def build_predictors(only: set[str] | None = None) -> dict[str, Predictor]:
     def requested(name: str) -> bool:
         return only is None or name in only
@@ -130,9 +148,7 @@ def build_predictors(only: set[str] | None = None) -> dict[str, Predictor]:
         predictors["stressful"] = accentuator.accentuate
 
     if requested("silero-onnx"):
-        predictors["silero-onnx"] = lambda text: extract_accent_mask(
-            accentuator.silero(text)
-        )
+        predictors["silero-onnx"] = lambda text: neural_mask(accentuator, text)
 
     if requested("ruaccent"):
         try:

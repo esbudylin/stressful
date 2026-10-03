@@ -26,6 +26,7 @@ import logging
 import re
 from collections import defaultdict
 from dataclasses import dataclass
+from enum import Enum
 from itertools import count
 from typing import Iterable, Iterator
 
@@ -33,7 +34,13 @@ from .settings import ACCENT_DICT_PATHS, SILERO_MODEL_DIR, STRESS_TOKEN
 from .silero import SileroAccentor
 
 unstressed_prefixes = ["по-"]
-unstressed_postfixes = ["-ка", "-нибудь"]
+unstressed_postfixes = ["-ка", "-нибудь", "-то"]
+
+
+class AccentSource(Enum):
+    DICT = "dict"
+    NEURAL = "neural"
+    NONE = "none"
 
 
 @dataclass
@@ -44,6 +51,14 @@ class AccentEntry:
     secondary_accents: list[int]
     yo: list[int]
     no_accent: bool
+
+
+@dataclass
+class WordAccentuation:
+    word: str
+    source: AccentSource
+    probabilities: list[float]
+    is_homograph: bool = False
 
 
 def parse_word_entry(word: str) -> tuple[str, set[str]]:
@@ -170,72 +185,86 @@ def accent_line(
     line: str,
     accent_dict: defaultdict[str, list[AccentEntry]],
     silero_accentor: SileroAccentor,
-) -> list[bool]:
+) -> list[WordAccentuation]:
     line_stripped = re.sub(r"[^А-яЁё\s-]+", "", line)
     words = list(filter(vowel_count, line_stripped.split()))
-    words_nacc = None
 
-    def extract_words_nacc():
-        res = extract_neuro_accents(line, silero_accentor)
-        if len(words) != len(res):
-            raise ValueError(
-                f"""Number of words with vowels ({len(words)})
-                does not match number of neuro-accented words ({len(res)})"""
-            )
-        return res
+    neuro = None
 
-    res = []
+    def load_neuro():
+        nonlocal neuro
+        if neuro is None:
+            neuro = silero_accentor.accent_word_probabilities(line, words)
+
+    result = []
 
     for j, word in enumerate(words):
+        is_homograph = False
+
         if is_word_without_accent(word):
-            word_mask = base_mask(word)
+            source = AccentSource.NONE
+            word_probs = [0.0] * vowel_count(word)
         else:
             accent_entry = find_accent_entry(word, accent_dict)
 
             if not accent_entry or should_use_neuro_accent(word, accent_entry):
-                if words_nacc is None:
-                    words_nacc = extract_words_nacc()
-
-                word_mask = words_nacc[j]
+                source = AccentSource.NEURAL
+                load_neuro()
+                word_probs, is_homograph = neuro[j]
             else:
-                word_mask = accent_word_by_dict(word, accent_entry)
+                source = AccentSource.DICT
+                word_probs = accent_word_by_dict(word, accent_entry)
 
-        res += apply_special_rules(word, word_mask)
+        word_probs = apply_special_rules_to_probs(word, word_probs)
 
-    return res
+        result.append(
+            WordAccentuation(
+                word=word,
+                source=source,
+                probabilities=word_probs,
+                is_homograph=is_homograph,
+            )
+        )
+
+    return result
 
 
-def apply_special_rules(word: str, mask: list[bool]) -> list[bool]:
-    if not mask:
-        return mask
+def apply_special_rules_to_probs(
+    word: str,
+    probs: list[float],
+) -> list[float]:
+    forced = set()
 
     for prefix in unstressed_prefixes:
         if word.startswith(prefix):
-            vowels = vowel_count(prefix)
-            mask[:vowels] = [False] * vowels
+            forced.update(range(vowel_count(prefix)))
             break
 
     for postfix in unstressed_postfixes:
         if word.endswith(postfix):
+            total = vowel_count(word)
             vowels = vowel_count(postfix)
-            mask[-vowels:] = [False] * vowels
+            forced.update(range(total - vowels, total))
             break
 
-    return mask
+    for i in forced:
+        probs[i] = 0.0
+
+    return probs
 
 
-def accent_word_by_dict(word: str, accent_entry: AccentEntry) -> list[bool]:
-    mask = base_mask(word)
+def accent_word_by_dict(word: str, accent_entry: AccentEntry) -> list[float]:
+    probs = [0.0 for c in word if is_vowel(c)]
 
     all_accents = (
         accent_entry.accents + accent_entry.secondary_accents + accent_entry.yo
     )
 
     for accent in all_accents:
-        accent_pos = min(len(mask) - 1, accent - 1)
-        mask[accent_pos] = True
+        accent_pos = min(len(probs) - 1, accent - 1)
+        probs[accent_pos] = 1.0
 
-    return mask
+    return probs
 
 
 def should_use_neuro_accent(word: str, accent: AccentEntry) -> bool:
@@ -282,10 +311,6 @@ def normalize(s):
     return s.lower(), caps
 
 
-def base_mask(word):
-    return [False for c in word if is_vowel(c)]
-
-
 def find_accent_entry(
     word: str,
     accent_dict: defaultdict[str, list[AccentEntry]],
@@ -312,46 +337,20 @@ def find_accent_entry(
     return found_entry
 
 
-def extract_accent_mask(text: str) -> list[bool]:
-    result = []
-
-    def is_accent_mark(char):
-        return char and char == STRESS_TOKEN
-
-    pending_accent = False
-
-    for i, char in enumerate(text):
-        if is_accent_mark(char):
-            pending_accent = True
-
-        if is_vowel(char):
-            result.append(pending_accent)
-            pending_accent = False
-
-    return result
-
-
-def extract_neuro_accents(
-    line: str,
-    silero_accentor: SileroAccentor,
-) -> list[list[bool]]:
-    words = silero_accentor(line).split()
-
-    res = []
-    for word in words:
-        if mask := extract_accent_mask(word):
-            res.append(mask)
-
-    return res
-
-
 class Accentuator:
     def __init__(self):
-        self.accent_dict = build_accent_dict(read_accent_dicts(ACCENT_DICT_PATHS))
-        self.silero = SileroAccentor(SILERO_MODEL_DIR)
+        self._accent_dict = build_accent_dict(read_accent_dicts(ACCENT_DICT_PATHS))
+        self._silero = SileroAccentor(SILERO_MODEL_DIR)
 
     def accentuate(self, line: str) -> list[bool]:
-        return accent_line(line, self.accent_dict, self.silero)
+        return [
+            stressed > 0.5
+            for wa in self.accentuate_detailed(line)
+            for stressed in wa.probabilities
+        ]
+
+    def accentuate_detailed(self, line: str) -> list[WordAccentuation]:
+        return accent_line(line, self._accent_dict, self._silero)
 
     def mark_stresses(
         self,

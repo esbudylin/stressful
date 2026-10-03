@@ -1,3 +1,3 @@
-from .accentuator import Accentuator
+from .accentuator import AccentSource, Accentuator, WordAccentuation
 
-__all__ = ["Accentuator"]
+__all__ = ["AccentSource", "Accentuator", "WordAccentuation"]

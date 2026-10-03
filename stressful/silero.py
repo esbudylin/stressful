@@ -31,8 +31,6 @@ from collections import OrderedDict
 import numpy as np
 import onnxruntime as ort
 
-from .settings import STRESS_TOKEN
-
 VOWELS = "аоуыэиеяёю"
 
 
@@ -60,19 +58,6 @@ def _decapitalize_stress(stressed_word: str) -> str:
         if char.isupper():
             return stressed_word[:idx] + "+" + stressed_word[idx:].lower()
     return stressed_word
-
-
-_LETTER_RE = re.compile(r"[А-Яа-яёЁ]")
-
-
-def _letter_positions(word: str) -> list[int]:
-    """Positions of Cyrillic letters in ``word``.
-
-    Mirrors the tokenizer cleaning (lowercase, drop everything that is not a
-    Cyrillic letter), so positions stored for a cleaned word can be mapped
-    back onto the raw token, which may still contain punctuation or marks.
-    """
-    return [i for i, char in enumerate(word.lower()) if _LETTER_RE.fullmatch(char)]
 
 
 class _BasicTokenizer:
@@ -297,33 +282,6 @@ class SileroAccentor:
                 vocab[token.rstrip("\n")] = index
         return vocab
 
-    def __call__(
-        self,
-        sentence: str,
-        put_stress: bool = True,
-        put_stress_homo: bool = True,
-        put_yo: bool = True,
-        put_yo_homo: bool = True,
-        stress_single_vowel: bool = True,
-        words_to_ignore=None,
-    ) -> str:
-        solved = self._solve_homographs(
-            sentence,
-            put_stress=put_stress_homo,
-            put_yo=put_yo_homo,
-            stress_single_vowel=stress_single_vowel,
-            words_to_ignore=words_to_ignore,
-        )
-
-        return self._accentuate(
-            solved,
-            put_stress=put_stress,
-            put_yo=put_yo,
-            stress_single_vowel=stress_single_vowel,
-            skip_stress_words=None if put_stress_homo else self.homodict,
-            skip_yo_words=None if put_yo_homo else self.yohomodict,
-            words_to_ignore=words_to_ignore,
-        )
 
     def _embed(self, words: list[str]) -> np.ndarray:
         result = np.empty(
@@ -355,188 +313,59 @@ class SileroAccentor:
 
         return stress_probs, stress_preds, yo_probs, yo_preds
 
-    def _accentuate(
-        self,
-        sentence,
-        put_stress=True,
-        put_yo=True,
-        stress_single_vowel=False,
-        skip_stress_words=None,
-        skip_yo_words=None,
-        words_to_ignore=None,
-    ):
-        skip_stress_words = skip_stress_words if skip_stress_words is not None else []
-        skip_yo_words = skip_yo_words if skip_yo_words is not None else []
+    def stress_distributions(self, words: list[str]) -> list[list[float]]:
+        """Per-word stress probabilities over the word's vowel positions.
 
-        if not (put_stress or put_yo):
-            return sentence
+        The stress model is word-level and does not use sentential context,
+        so each word is scored independently. The raw softmax output spans a
+        fixed number of class positions; only the positions corresponding to
+        the word's vowels are kept, and the values are not renormalized. Words
+        with more vowels than the model has output classes are zero-padded to
+        the word's vowel count.
+        """
+        clean_tokens = []
+        spans = []
 
-        raw_tokens, clean_tokens, prediction_mask = self._tokenize(
-            sentence, words_to_ignore
-        )
+        for word in words:
+            _, clean, _ = self._tokenize(word)
+            start = len(clean_tokens)
+            clean_tokens.extend(clean)
+            spans.append((start, len(clean_tokens)))
 
-        stress_probs, stress_preds, yo_probs, yo_preds = self._get_model_preds(
-            clean_tokens
-        )
+        if not clean_tokens:
+            return [[] for _ in words]
 
-        accented_sentence = []
-        for word_idx, (raw_word, clean_word, need_processing) in enumerate(
-            zip(raw_tokens, clean_tokens, prediction_mask)
-        ):
-            raw_word_lower = raw_word.lower()
+        stress_probs, _, _, _ = self._get_model_preds(clean_tokens)
 
-            if not need_processing:
-                accented_sentence.append(raw_word)
-                continue
+        result = []
 
-            have_stress = STRESS_TOKEN in raw_word_lower
-            have_yo = "ё" in raw_word_lower
-            if have_stress is True and have_yo is True:
-                accented_sentence.append(raw_word)
-                continue
-            if have_stress is False and have_yo is True and put_stress:
-                if (
-                    sum(c in self.vowels for c in raw_word_lower) == 1
-                    and not stress_single_vowel
-                ) or clean_word.replace("ё", "е") in skip_stress_words:
-                    accented_sentence.append(raw_word)
-                    continue
-                user_yo_positions = [
-                    i for i, x in enumerate(raw_word_lower) if x == "ё"
-                ]
-                for i, yo_pos in enumerate(user_yo_positions):
-                    raw_word = (
-                        raw_word[: yo_pos + i] + STRESS_TOKEN + raw_word[(yo_pos + i) :]
-                    )
-                accented_sentence.append(raw_word)
-                continue
+        for word, (start, end) in zip(words, spans):
+            probs = []
 
-            if clean_word in self.exceptions:
-                accented_sentence.append(
-                    self._accentuate_exception(
-                        clean_word=clean_word,
-                        raw_word=raw_word,
-                        have_stress=have_stress,
-                    )
-                )
-                continue
+            for i in range(start, end):
+                n_vowels = sum(c in self.vowels for c in clean_tokens[i])
+                part = stress_probs[i][:n_vowels].tolist()
 
-            stressed_vowel_ids = [stress_preds[word_idx]]
-            passed_stress_trs = stress_probs[word_idx][stressed_vowel_ids[0]] > (
-                0.5 if put_stress else 1
-            )
-            set_stress = (
-                passed_stress_trs
-                and not have_stress
-                and (clean_word.replace("ё", "е") not in skip_stress_words)
-            )
+                if len(part) < n_vowels:
+                    part.extend([0.0] * (n_vowels - len(part)))
 
-            yo_vowel_ids = [yo_preds[word_idx]] if yo_preds is not None else [-10]
-            passed_yo_trs = yo_preds is not None and yo_probs[word_idx][
-                yo_vowel_ids[0]
-            ] > (0.5 if put_yo else 1)
-            set_yo = passed_yo_trs and (
-                clean_word.replace("ё", "е") not in skip_yo_words
-            )
+                probs.extend(part)
 
-            if have_stress:
-                stressed_vowel_ids = [
-                    sum(map(stressed_part.count, self.vowels))
-                    for stressed_part in raw_word_lower.split(STRESS_TOKEN)
-                ]
+            result.append(probs)
 
-            stress_positions, yo_positions, num_vowels, first_vowel_pos = (
-                self._get_positions(raw_word_lower, stressed_vowel_ids, yo_vowel_ids)
-            )
-            if num_vowels == 0:
-                accented_sentence.append(raw_word)
-                continue
+        return result
 
-            for yo_pos in yo_positions:
-                if yo_pos in stress_positions and set_yo:
-                    if raw_word_lower[yo_pos] == "е":
-                        raw_word = (
-                            raw_word[:yo_pos]
-                            + ("ё" if raw_word[yo_pos].islower() else "Ё")
-                            + raw_word[(yo_pos + 1) :]
-                        )
+    def word_parts(self, word: str) -> list[tuple[str, bool]]:
+        """Split a word into accentuation parts.
 
-            if num_vowels == 1:
-                stress_positions = [first_vowel_pos]
-                set_stress = stress_single_vowel and put_stress
+        Parts are separated by hyphens; each is accented independently.
+        Returns ``(clean_part, needs_processing)`` pairs, where
+        ``needs_processing`` is ``False`` for enclitic parts such as the final
+        ``-то``.
+        """
+        _, clean, mask = self._tokenize(word)
+        return list(zip(clean, mask))
 
-            if not have_stress and set_stress:
-                for i, stress_pos in enumerate(stress_positions):
-                    raw_word = (
-                        raw_word[: (stress_pos + i)]
-                        + STRESS_TOKEN
-                        + raw_word[(stress_pos + i) :]
-                    )
-
-            accented_sentence.append(raw_word)
-
-        return self._fuse_words_to_sentence(accented_sentence)
-
-    def _get_positions(self, word, stressed_vowel_ids, yo_vowel_ids):
-        vowel_ids = [i for i, c in enumerate(word) if c in self.vowels]
-        ye_ids = [i for i, c in enumerate(word) if c == "е"]
-
-        stress_positions = [
-            vowel_ids[idx]
-            for idx in stressed_vowel_ids
-            if (idx < len(vowel_ids)) and (len(vowel_ids) > 0)
-        ]
-        yo_positions = [
-            ye_ids[idx - 1]
-            for idx in yo_vowel_ids
-            if (idx > 0) and (idx - 1 < len(ye_ids)) and (len(ye_ids) > 0)
-        ]
-
-        num_vowels = len(vowel_ids)
-        first_vowel_pos = vowel_ids[0] if len(vowel_ids) > 0 else -1
-        return stress_positions, yo_positions, num_vowels, first_vowel_pos
-
-    def _accentuate_exception(self, clean_word, raw_word, have_stress):
-        exc_stress = self.exceptions[clean_word][0]
-        exc_yo = self.exceptions[clean_word][1]
-
-        # Indices in exceptions.json are relative to the cleaned word
-        # (lowercased, punctuation stripped). Map them onto raw_word, which
-        # may still contain punctuation, so slicing happens at the right
-        # characters.
-        positions = _letter_positions(raw_word)
-        exc_stress = positions[exc_stress]
-        exc_yo = positions[exc_yo] if exc_yo != -1 else -1
-
-        if have_stress:
-            user_stress_token_positions = [
-                i for i, c in enumerate(raw_word) if c == STRESS_TOKEN
-            ]
-            accentuated_word = raw_word.replace(STRESS_TOKEN, "")
-            if exc_yo != -1 and (exc_yo + 1 in user_stress_token_positions):
-                accentuated_word = (
-                    accentuated_word[:exc_yo]
-                    + ("ё" if accentuated_word[exc_yo].islower() else "Ё")
-                    + accentuated_word[(exc_yo + 1) :]
-                )
-            for stress_token_pos in user_stress_token_positions:
-                accentuated_word = (
-                    accentuated_word[:stress_token_pos]
-                    + STRESS_TOKEN
-                    + accentuated_word[stress_token_pos:]
-                )
-        elif not have_stress:
-            if exc_yo != -1:
-                raw_word = (
-                    raw_word[:exc_yo]
-                    + ("ё" if raw_word[exc_yo].islower() else "Ё")
-                    + raw_word[(exc_yo + 1) :]
-                )
-            accentuated_word = (
-                raw_word[:exc_stress] + STRESS_TOKEN + raw_word[exc_stress:]
-            )
-
-        return accentuated_word
 
     def _tokenize(self, sentence, words_to_ignore=None):
         words_to_ignore = words_to_ignore if words_to_ignore is not None else []
@@ -569,21 +398,14 @@ class SileroAccentor:
 
         return tokens, model_inputs, prediction_mask
 
-    @staticmethod
-    def _fuse_words_to_sentence(words):
-        return "".join(words).replace("-", "-")
 
-    def _solve_homographs(
-        self,
-        sentence,
-        put_stress=True,
-        put_yo=True,
-        stress_single_vowel=True,
-        words_to_ignore=None,
-    ):
-        if not (put_stress or put_yo):
-            return sentence
+    def _resolve_homographs(self, sentence, words_to_ignore=None):
+        """Pick a reading for each homograph in the sentence.
 
+        Returns a list of ``(start, end, word, word_pred, confidence)`` in
+        occurrence order, where ``confidence`` is the sigmoid score of the
+        chosen reading (1.0 for deterministic phrase-based predictions).
+        """
         tagged = self._find_and_tag_homos(sentence, words_to_ignore=words_to_ignore)
 
         batch_starts = []
@@ -624,8 +446,9 @@ class SileroAccentor:
             is_neural_preds.append(regex_pred is None)
 
         if len(words) == 0:
-            return sentence
+            return []
 
+        homosolver_probs = None
         if len(batch_sents) > 0:
             max_len = max(len(ids) for ids in batch_sents)
             input_ids = np.full(
@@ -644,42 +467,166 @@ class SileroAccentor:
                     "homo_end": np.array(batch_ends, dtype=np.int64),
                 },
             )[0]
-            homosolver_preds = np.round(_sigmoid(logits))
+            homosolver_probs = _sigmoid(logits)
 
         regex_idx = 0
         homosolver_idx = 0
-        word_preds = []
-        for word, is_neural in zip(words, is_neural_preds):
+        resolved = []
+
+        for start, end, word, is_neural in zip(starts, ends, words, is_neural_preds):
             if is_neural:
-                pred = int(homosolver_preds[homosolver_idx][0])
-                word_pred = sorted(self.homodict[word.lower()])[pred]
+                confidence = float(homosolver_probs[homosolver_idx][0])
+                candidates = sorted(self.homodict[word.lower()])
+                pred = int(np.round(confidence))
+                word_pred = candidates[pred]
                 homosolver_idx += 1
             else:
                 word_pred = regex_preds[regex_idx]
+                candidates = [word_pred]
+                confidence = 1.0
                 regex_idx += 1
-            word_preds.append(word_pred)
 
-        stressed_sent = sentence
-        offset = 0
-        for start, end, word, word_pred in zip(starts, ends, words, word_preds):
-            start = start + offset
-            end = end + offset
-            word_pred = word_pred if put_yo else word_pred.replace("ё", "е")
-            n_vowels = sum(c.lower() in self.vowels for c in word_pred)
-            stress_idx = word_pred.index("+")
-            word_pred = word_pred.replace("+", "")
-            word_pred = "".join(
-                [
-                    c2.lower() if c1.islower() else c2.upper()
-                    for c1, c2 in zip(word, word_pred)
-                ]
-            )
-            if (n_vowels > 1 or stress_single_vowel) and put_stress:
-                word_pred = word_pred[:stress_idx] + "+" + word_pred[stress_idx:]
-                offset += 1
-            stressed_sent = stressed_sent[:start] + word_pred + stressed_sent[end:]
+            resolved.append((start, end, word, word_pred, confidence, candidates))
 
-        return stressed_sent
+        return resolved
+
+    @staticmethod
+    def _stress_vowel_index(variant: str) -> int:
+        index = 0
+        for char in variant:
+            if char == "+":
+                return index
+            if char in VOWELS:
+                index += 1
+        return index
+
+    def _candidate_distribution(
+        self,
+        candidates: list[str],
+        confidence: float,
+    ) -> list[float]:
+        num_vowels = sum(c in VOWELS for c in candidates[0])
+        probs = [0.0] * num_vowels
+
+        if len(candidates) == 1:
+            probs[self._stress_vowel_index(candidates[0])] = 1.0
+        else:
+            probs[self._stress_vowel_index(candidates[0])] += 1.0 - confidence
+            probs[self._stress_vowel_index(candidates[1])] += confidence
+
+        return probs
+
+    def homograph_distributions(
+        self,
+        sentence: str,
+        words: list[str],
+        words_to_ignore=None,
+    ) -> dict[int, list[float]]:
+        """Per-syllable stress distribution of each resolved homograph.
+
+        Returns ``{word_index: probabilities}``, keyed by the index of the
+        word in ``words``. Both ``words`` and the resolved homographs are in
+        text order, so occurrences are matched by walking a cursor forward.
+        Words not present in ``words`` as a whole token (e.g. a hyphen part)
+        are skipped. ``probabilities`` is spread over the stressed vowels of
+        the candidate readings; deterministic phrase predictions yield a
+        one-hot vector.
+        """
+        result = {}
+        cursor = 0
+
+        for _, _, word, _, confidence, candidates in self._resolve_homographs(
+            sentence, words_to_ignore
+        ):
+            target = word.lower()
+
+            for index in range(cursor, len(words)):
+                if words[index].lower() == target:
+                    result[index] = self._candidate_distribution(
+                        candidates, confidence
+                    )
+                    cursor = index + 1
+                    break
+
+        return result
+
+    @staticmethod
+    def _letter_to_vowel_index(word: str, letter_index: int) -> int:
+        return sum(c in VOWELS for c in word[:letter_index])
+
+    def exception_distribution(self, word: str) -> list[float] | None:
+        """Per-syllable stress distribution for an exception word.
+
+        Returns ``None`` if the word is not an exception. Exception words carry
+        deterministic stress (and optionally ё), so the distribution is one-hot.
+        """
+        clean = re.sub(r"[^А-Яа-яёЁ]", "", word.lower())
+
+        if clean not in self.exceptions:
+            return None
+
+        num_vowels = sum(c in VOWELS for c in clean)
+        probs = [0.0] * num_vowels
+
+        stress_pos, yo_pos = self.exceptions[clean]
+        probs[self._letter_to_vowel_index(clean, stress_pos)] = 1.0
+
+        if yo_pos != -1:
+            probs[self._letter_to_vowel_index(clean, yo_pos)] = 1.0
+
+        return probs
+
+    def accent_word_probabilities(
+        self,
+        line: str,
+        words: list[str],
+    ) -> list[tuple[list[float], bool]]:
+        """Per-word stress probabilities, resolving hyphen parts.
+
+        Each hyphen-separated part is an independent accentuation unit and may
+        be an enclitic (no stress), a homograph, an exception, or a model
+        prediction. Returns ``(probabilities, is_homograph)`` per word, with
+        the probabilities concatenated over the word's parts.
+        """
+        parts = [
+            (index, text, needs_processing)
+            for index, word in enumerate(words)
+            for text, needs_processing in self.word_parts(word)
+            if sum(c in self.vowels for c in text)
+        ]
+
+        if not parts:
+            return [([], False) for _ in words]
+
+        texts = [text for _, text, _ in parts]
+        distributions = self.stress_distributions(texts)
+        homographs = self.homograph_distributions(line, texts)
+
+        probabilities = [[] for _ in words]
+        is_homograph = [False] * len(words)
+
+        for i, (index, text, needs_processing) in enumerate(parts):
+            num_vowels = sum(c in self.vowels for c in text)
+
+            if not needs_processing:
+                probs = [0.0] * num_vowels
+            elif i in homographs:
+                probs = homographs[i]
+                is_homograph[index] = True
+            else:
+                exception_probs = self.exception_distribution(text)
+
+                if exception_probs is not None:
+                    probs = exception_probs
+                else:
+                    probs = distributions[i]
+
+            probabilities[index].extend(probs)
+
+        return [
+            (probabilities[index], is_homograph[index]) for index in range(len(words))
+        ]
+
 
     @staticmethod
     def _predict_with_pattern(pattern, text):
