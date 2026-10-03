@@ -292,25 +292,20 @@ class SileroAccentor:
 
         return result
 
-    def _get_model_preds(self, words):
+    def _get_stress_logits(self, words):
         embeddings = self._embed(words)
 
-        stress_logits = self.stress_session.run(None, {"emb": embeddings})[0]
-
-        stress_probs = _softmax(stress_logits, axis=1)
-        stress_preds = np.argmax(stress_probs, axis=1)
-
-        return stress_probs, stress_preds
+        return self.stress_session.run(None, {"emb": embeddings})[0]
 
     def stress_distributions(self, words: list[str]) -> list[list[float]]:
         """Per-word stress probabilities over the word's vowel positions.
 
         The stress model is word-level and does not use sentential context,
-        so each word is scored independently. The raw softmax output spans a
-        fixed number of class positions; only the positions corresponding to
-        the word's vowels are kept, and the values are not renormalized. Words
-        with more vowels than the model has output classes are zero-padded to
-        the word's vowel count.
+        so each word is scored independently. The model returns logits over a
+        fixed number of class positions; a softmax is applied per word over
+        only the positions corresponding to that word's vowels, so the values
+        sum to 1. Words with more vowels than the model has output classes are
+        zero-padded to the word's vowel count.
         """
         clean_tokens = []
         spans = []
@@ -324,7 +319,7 @@ class SileroAccentor:
         if not clean_tokens:
             return [[] for _ in words]
 
-        stress_probs, _ = self._get_model_preds(clean_tokens)
+        stress_logits = self._get_stress_logits(clean_tokens)
 
         result = []
 
@@ -333,7 +328,10 @@ class SileroAccentor:
 
             for i in range(start, end):
                 n_vowels = sum(c in self.vowels for c in clean_tokens[i])
-                part = stress_probs[i][:n_vowels].tolist()
+                part = []
+
+                if n_vowels:
+                    part = _softmax(stress_logits[i][:n_vowels], axis=0).tolist()
 
                 if len(part) < n_vowels:
                     part.extend([0.0] * (n_vowels - len(part)))
