@@ -19,13 +19,16 @@ uv add "git+https://github.com/esbudylin/stressful"
 ## Usage
 
 `Accentuator()` loads the accent dictionaries and the ML models on
-construction. It exposes two methods:
+construction. It exposes three methods:
 
 - `mark_stresses(line, stress_mark) -> str` - returns the line with a
   stress mark inserted after each stressed vowel. By default, '+' will
   be used as a stress mark.
 - `accentuate(line) -> list[bool]` - returns a binary mask with an
-  element per syllable.
+  element per syllable (`True` where the syllable is stressed).
+- `accentuate_detailed(line) -> list[WordAccentuation]` - returns one
+  record per word with the per-syllable stress probabilities and the
+  source they came from.
 
 Examples:
 ```python
@@ -75,7 +78,7 @@ libraries.
 |[stressrnn](https://github.com/dbklim/StressRNN)          |  0.8395|
 |[ruaccent](https://github.com/Den4ikAI/ruaccent)          |  0.9351|
 |[silero-stress](https://github.com/snakers4/silero-stress)|  0.9629|
-|**stressful**                                             |  0.9668|
+|**stressful**                                             |  0.9670|
 
 <details>
 <summary>Validation dataset</summary>
